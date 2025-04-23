@@ -113,13 +113,19 @@ def visualize(wall_lines, polygons, output_path):
 # --- 主流程 ------------------------------------------------------------------
 if __name__ == '__main__':
     # 直接在此处指定输入和输出路径，无需通过命令行
-    input_path = '/Volumes/T7/BSAI/250416-量子城市横向/09-dwg/data/FL809X6V_A09-地下车库.dxf'
-    output_wkt  = 'polygons.txt'   # WKT 列表输出
-    output_img  = 'output.png'     # 可视化图像输出
+    input_path = r'E:\03-pkusz\03-杂项\09-dwg\data\3二层平面布置图-总规0613.dxf'
+    output_dir = r'E:\03-pkusz\03-杂项\09-dwg\output_绿房子'     # 输出目录
+    output_wkt = os.path.join(output_dir, 'polygons.txt')        # WKT 列表输出
+    output_img = os.path.join(output_dir, 'output.png')          # 可视化图像输出
 
     if not os.path.isfile(input_path):
         print(f"[ERROR] 找不到文件: {input_path}")
         sys.exit(1)
+        
+    # 确保输出目录存在
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"[INFO] 创建输出目录: {output_dir}")
 
     # 执行前处理
     doc = parse_cad_file(input_path)

@@ -22,6 +22,7 @@ import traceback
 import logging
 import datetime
 from pathlib import Path
+import ezdxf.transform as transform
 
 # 配置matplotlib支持中文显示
 def setup_matplotlib_chinese():
@@ -43,7 +44,6 @@ def setup_matplotlib_chinese():
             font_path = fm.findfont(fm.FontProperties(family=font_name))
             if font_path and "ttf" in font_path.lower() and not font_path.endswith('DejaVuSans.ttf'):
                 chinese_fonts.append(font_name)
-                log_print(f"找到中文字体: {font_name} at {font_path}")
                 break
         except:
             continue
@@ -51,7 +51,6 @@ def setup_matplotlib_chinese():
     # 如果找到了中文字体，设置为matplotlib默认字体
     if chinese_fonts:
         plt.rcParams['font.family'] = chinese_fonts[0]
-        log_print(f"设置matplotlib默认字体为: {chinese_fonts[0]}")
     else:
         # 尝试使用系统默认字体
         try:
@@ -66,7 +65,6 @@ def setup_matplotlib_chinese():
                     if any(name in font_path.lower() for name in ['hei', 'yuan', 'song', 'gothic', 'ming', 'black', 'bold']):
                         plt.rcParams['font.family'] = 'sans-serif'
                         plt.rcParams['font.sans-serif'] = [font_name] + plt.rcParams['font.sans-serif']
-                        log_print(f"尝试使用系统字体: {font_name}")
                         break
                 except:
                     continue
@@ -278,6 +276,69 @@ def convert_dwg_to_dxf(dwg_file, dxf_file=None):
         except Exception as e:
             log_print(f"清理临时文件时出错: {e}", 'error')
 
+def generate_original_preview(dxf_file, output_file, img_size=3000):
+    """
+    为原始DXF文件生成预览图
+    
+    参数:
+        dxf_file: DXF文件路径
+        output_file: 预览图输出路径
+        img_size: 预览图尺寸
+    
+    返回:
+        extents: 图纸范围 [xmin, ymin, xmax, ymax]
+    """
+    
+    try:
+        # 读取DXF文件
+        original_doc = ezdxf.readfile(dxf_file)
+        
+        # 获取绘图范围
+        extents = get_drawing_extents(original_doc.modelspace())
+        if not extents:
+            extents = (0, 0, 1000, 1000)
+            log_print("警告: 无法获取绘图范围，使用默认范围")
+        
+        # 提取所有实体线条
+        all_entities = []
+        for entity in original_doc.modelspace():
+            try:
+                if entity.dxftype() == 'LINE':
+                    start = (entity.dxf.start.x, entity.dxf.start.y)
+                    end = (entity.dxf.end.x, entity.dxf.end.y)
+                    all_entities.append([(start, end)])
+                elif entity.dxftype() == 'LWPOLYLINE':
+                    points = [(point[0], point[1]) for point in entity.get_points()]
+                    if len(points) >= 2:
+                        segments = []
+                        for i in range(len(points) - 1):
+                            segments.append((points[i], points[i+1]))
+                        if entity.is_closed and len(points) > 2:
+                            segments.append((points[-1], points[0]))
+                        all_entities.append(segments)
+                elif entity.dxftype() in ('ARC', 'CIRCLE', 'ELLIPSE', 'SPLINE'):
+                    # 这些实体类型通常使用更复杂的绘制方法，但为简单起见，我们至少标记它们的位置
+                    if hasattr(entity.dxf, 'center'):
+                        center = (entity.dxf.center.x, entity.dxf.center.y)
+                        radius = getattr(entity.dxf, 'radius', 2)  # 默认半径
+                        # 添加一个小十字表示中心点
+                        size = radius / 2
+                        all_entities.append([((center[0]-size, center[1]), (center[0]+size, center[1]))])
+                        all_entities.append([((center[0], center[1]-size), (center[0], center[1]+size))])
+            except Exception as e:
+                log_print(f"提取实体时出错: {e}", 'debug')
+        
+        # 创建预览图像
+        preview_img = create_preview_image(all_entities, extents, output_file, img_size)
+        
+        if preview_img is not None:
+            log_print(f"原始DXF文件预览图已保存到: {output_file}")
+            
+        return extents
+    except Exception as e:
+        log_print(f"生成原始预览图像时出错: {e}", 'error')
+        return None
+
 def extract_rooms_from_dwg(input_file, output_dir=None, img_size=1024, min_room_area=1.0, max_room_area=None):
     """
     从DWG文件中提取房间轮廓
@@ -293,7 +354,7 @@ def extract_rooms_from_dwg(input_file, output_dir=None, img_size=1024, min_room_
         rooms: 房间多边形列表
         extents: 范围 [xmin, ymin, xmax, ymax]
     """
-    log_print(f"处理文件: {input_file}")
+    # log_print(f"处理文件: {input_file}")
     
     # 创建输出目录
     if output_dir is None:
@@ -325,6 +386,10 @@ def extract_rooms_from_dwg(input_file, output_dir=None, img_size=1024, min_room_
         else:
             input_file_to_process = input_file
         
+        # 0. 输出原始DXF文件的预览图 - 使用独立函数
+        original_preview_file = os.path.join(output_dir, "original_preview.png")
+        generate_original_preview(input_file_to_process, original_preview_file, img_size=3000)
+        
         # 1. 预处理DXF文件
         preprocessed_file = os.path.join(output_dir, "preprocessed.dxf")
         try:
@@ -350,7 +415,7 @@ def extract_rooms_from_dwg(input_file, output_dir=None, img_size=1024, min_room_
             final_extents = extents_from_walls
             log_print("使用从墙体计算的范围")
         else:
-            log_print("警告: 无法确定图纸范围，使用默认范围 (0,0,1000,1000)")
+            log_print("警告: 无法确定图纸范围，使用默认范围")
             final_extents = (0, 0, 1000, 1000)
         
         # 3. 保存房间轮廓到DXF文件
@@ -417,14 +482,32 @@ def get_drawing_extents(modelspace):
                     max_y = max(max_y, point[1])
                     entity_count += 1
             except Exception as e:
-                log_print(f"警告: 处理实体点时出错: {e}")
+                log_print(f"警告: 处理实体点时出错: {e}", 'debug')  # 改为debug级别
+        # 特别处理Circle实体
+        elif entity.dxftype() == 'CIRCLE' and hasattr(entity.dxf, 'center') and hasattr(entity.dxf, 'radius'):
+            try:
+                # 直接使用圆心和半径计算边界
+                center = entity.dxf.center
+                radius = entity.dxf.radius
+                min_x = min(min_x, center.x - radius)
+                min_y = min(min_y, center.y - radius)
+                max_x = max(max_x, center.x + radius)
+                max_y = max(max_y, center.y + radius)
+                entity_count += 1
+            except Exception as e:
+                log_print(f"警告: 处理Circle实体时出错: {e}", 'debug')  # 使用debug级别
         elif hasattr(entity, 'vertices'):
             # 检查vertices是否为方法或属性
             try:
                 vertices = entity.vertices
-                # 如果是方法，则调用它
+                # 如果是方法，则调用它，对Circle类型特殊处理
                 if callable(vertices):
-                    vertices = vertices()
+                    # 避免对Circle调用vertices()方法时缺少angles参数
+                    if entity.dxftype() == 'CIRCLE':
+                        # 跳过Circle实体的vertices处理(因为前面已经特别处理过了)
+                        continue
+                    else:
+                        vertices = vertices()
                 
                 # 确保vertices是可迭代的
                 if hasattr(vertices, '__iter__'):
@@ -438,9 +521,10 @@ def get_drawing_extents(modelspace):
                                 max_y = max(max_y, point[1])
                                 entity_count += 1
                         except Exception as e:
-                            log_print(f"警告: 处理顶点时出错: {e}")
+                            log_print(f"警告: 处理顶点时出错: {e}", 'debug')  # 改为debug级别
             except Exception as e:
-                log_print(f"警告: 访问实体vertices时出错: {e}")
+                # 将日志级别改为debug，防止打印到控制台
+                log_print(f"警告: 访问实体vertices时出错: {e}", 'debug')
     
     if entity_count == 0:
         return None
@@ -497,27 +581,6 @@ def room_to_image(room, extents, img_width, img_height):
         # 返回空图像
         return np.zeros((img_height, img_width), dtype=bool)
 
-def extract_skeleton_coords(skeleton, extents, img_width, img_height):
-    """
-    从骨架图像中提取坐标点，并转换回原始坐标系
-    """
-    try:
-        min_x, min_y, max_x, max_y = extents
-        
-        y_indices, x_indices = np.where(skeleton > 0)
-        skeleton_coords = []
-        
-        for x, y in zip(x_indices, y_indices):
-            # 转换回原始坐标系
-            orig_x = min_x + (x / (img_width - 1)) * (max_x - min_x)
-            orig_y = min_y + (y / (img_height - 1)) * (max_y - min_y)
-            skeleton_coords.append((orig_x, orig_y))
-        
-        return skeleton_coords
-    except Exception as e:
-        log_print(f"警告: 提取骨架坐标时出错: {e}")
-        return []
-
 def save_skeleton_to_dxf(coords, output_file):
     """
     将骨架线保存为DXF文件
@@ -550,7 +613,7 @@ def preprocess_dwg(dxf_file, output_dxf=None):
     返回:
         预处理后的ezdxf文档对象
     """
-    log_print(f"预处理DXF文件: {dxf_file}")
+    # log_print(f"预处理DXF文件: {dxf_file}")
     
     try:
         # 读取DXF文件
@@ -561,15 +624,24 @@ def preprocess_dwg(dxf_file, output_dxf=None):
         layers_info = analyze_layers(doc)
         log_print(f"找到 {len(layers_info)} 个图层")
         
-        # 2. 识别可能的墙体图层
-        wall_layers = identify_wall_layers(layers_info)
-        log_print(f"识别出 {len(wall_layers)} 个可能的墙体图层: {', '.join(wall_layers)}")
+        # 2. 识别需要保留的图层(墙体和门窗)
+        relevant_layers = identify_wall_layers(layers_info)
+        # log_print(f"将保留 {len(relevant_layers)} 个图层: {', '.join(relevant_layers)}")
+        
+        # 记录清理前的实体数量
+        original_entities = len(list(doc.modelspace()))
         
         # 3. 清理不需要的图层和实体
-        cleaned_doc = clean_layers(doc, keep_layers=wall_layers)
+        cleaned_doc = clean_layers(doc, keep_layers=relevant_layers)
         
-        # 4. 修复断开的线条
-        repaired_doc = repair_broken_lines(cleaned_doc, tolerance=0.1)
+        # 记录清理后的实体数量
+        remaining_entities = len(list(cleaned_doc.modelspace()))
+        log_print(f"清理图层完成：从 {original_entities} 个实体减少到 {remaining_entities} 个实体，清理率: {(original_entities - remaining_entities) / original_entities * 100:.1f}%")
+        
+        # 4. 修复断开的线条 - 临时注释掉此步骤
+        # repaired_doc = repair_broken_lines(cleaned_doc, tolerance=0.1)
+        repaired_doc = cleaned_doc  # 直接使用清理后的文档，跳过修复断开线条的步骤
+        log_print("跳过修复断开线条的步骤")
         
         # 如果需要输出预处理后的文件
         if output_dxf:
@@ -635,7 +707,7 @@ def create_preview_image(walls, extents, output_file, img_size=2000):
     返回:
         生成的图像
     """
-    log_print(f"生成预处理预览图像: {output_file}")
+    # log_print(f"生成预处理预览图像: {output_file}")
     
     try:
         # 创建空白RGB图像
@@ -788,68 +860,198 @@ def analyze_layers(doc):
 
 def identify_wall_layers(layers_info):
     """
-    识别可能的墙体图层
+    识别可能的墙体图层、门窗图层和房间图层
     
     参数:
         layers_info: 图层信息字典
     
     返回:
-        可能的墙体图层名称列表
+        保留的图层名称列表（墙体+门窗图层），同时识别房间图层但不包含在返回结果中
     """
-    wall_layers = []
-    wall_related_keywords = ['WALL', 'wall', '墙', '墙体', 'A-WALL', 'S-WALL', 'ARCH', 'PLAN', '平面', '建筑']
+    # 初始化各类图层列表
+    wall_layers = []       # 墙体图层
+    door_window_layers = [] # 门窗图层
+    room_layers = []       # 房间图层
+    excluded_layers = []   # 排除图层
+    text_layers = []       # 文字相关图层
     
-    for layer_name, info in layers_info.items():
-        # 检查图层名称是否包含墙体相关关键词
-        if any(keyword in layer_name for keyword in wall_related_keywords):
-            wall_layers.append(layer_name)
-            continue
+    # ===== 关键词定义 =====
+    # 墙体相关关键词
+    wall_keywords = ['WALL', 'wall', '墙', '墙体', 'A-WALL', 'S-WALL', 'WALX', 'ARCH-WALL', '墙线', 
+                    'QA', 'QZ', 'MQ', 'QIANG', 'BZ', '隔墙', '砖墙','柱',
+                    '建-墙', '结构-墙', '建筑-墙', '剪力墙', '承重墙', '隔墙-砖墙', '隔墙—砖墙', 'I—隔墙']
+    
+    # 门窗相关关键词
+    door_window_keywords = ['DOOR', 'door', '门', 'A-DOOR', 'WINDOW', 'window', '窗', 'A-WINDOW', 
+                           'DOOR_WINDOW', 'OPENING', '建-窗', '建-门', 'I—平面—门', 'I-平面-窗', '门窗']
+    
+    # 房间相关关键词
+    room_keywords = ['ROOM', 'Room', 'room', '房间', '房', 'SPACE', 'Space', 'space', '空间', 
+                     'AREA', 'Area', 'area', '区域', 'ARCH-ROOM', 'A-ROOM', 'A-ZONE']
+    
+    # 文字和标注相关关键词
+    text_keywords = ['TEXT', 'DIM', 'TITLE', '标注', '文字', '标题', '编号', '图框', '图例', 
+                    'ANNOTATION', 'LABEL', 'NUMBER', 'NOTE', '备注', 'MARK', '符号', 'SYMBOL']
+    
+    # 其他应排除的关键词
+    exclude_keywords = [
+        # 家具相关
+        'FURN', 'furniture', '家具', 'DESK', 'TABLE', 'CHAIR', 'BED', 'SOFA', 
+        '桌', '椅', '床', '沙发', '柜', '橱', '移动家具', '室-家具', 'MOVABLE',
         
-        # 检查图层是否主要包含线条或多段线（墙体的常见表示）
-        entity_types = info['entity_types']
-        if ('LINE' in entity_types or 'LWPOLYLINE' in entity_types or 'POLYLINE' in entity_types) and \
-           (entity_types.get('LINE', 0) + entity_types.get('LWPOLYLINE', 0) + entity_types.get('POLYLINE', 0) > 10):
-            # 只有当图层包含足够多的线条或多段线时才考虑
-            wall_layers.append(layer_name)
-    
-    # 如果没有明确的墙体图层，则包含所有非辅助图层
-    if not wall_layers:
-        for layer_name, info in layers_info.items():
-            # 排除通常不包含墙体的图层
-            exclude_keywords = ['TEXT', 'DIM', 'TITLE', '标注', '文字', '标题', 'GRID', '轴网']
-            if not any(keyword in layer_name for keyword in exclude_keywords) and info['is_on'] and not info['is_frozen']:
-                wall_layers.append(layer_name)
-    
-    return wall_layers
-
-def identify_room_layers(layers_info):
-    """
-    识别可能包含房间定义的图层
-    
-    参数:
-        layers_info: 图层信息字典
-    
-    返回:
-        可能的房间定义图层名称列表
-    """
-    room_layers = []
-    room_related_keywords = ['ROOM', 'Room', 'room', '房间', '房', 'SPACE', 'Space', 'space', '空间', 
-                             'AREA', 'Area', 'area', '区域', 'ARCH-ROOM', 'A-ROOM', 'A-ZONE']
-    
-    for layer_name, info in layers_info.items():
-        # 检查图层名称是否包含房间相关关键词
-        if any(keyword in layer_name for keyword in room_related_keywords):
-            room_layers.append(layer_name)
-            continue
+        # 设备相关
+        'EQUIP', 'EQUIPMENT', '设备', '洁具', '卫生间', '装饰', '灯', '灯具', 
+        '电气', 'ELEC', '暖通', 'HVAC', '给排水', 'PLUMBING', '空调', 'AC', 'AIR',
         
-        # 检查图层是否主要包含多段线或闭合多段线（房间的常见表示）
+        # 装饰和结构元素
+        '地坪', '踏步', '栏杆', '分隔', '填充', '轮廓线', '面层线', '平顶',
+        'CEILING', '天花', 'FLOOR', '地面', 'STAIR', '楼梯', 'RAILING', '扶手', 
+        'DECORATION', '装饰', 'FINISHING', '饰面', 'PATTERN', '图案',
+        
+        # 其他非墙体图层
+        'GRID', '轴网', 'COLUMN', '柱', 'BEAM', '梁',
+        'LANDSCAPE', '景观', 'VEGETATION', '植被', 
+        'SITE', '场地', 'LINE', '线条', 'LAYOUT', '布局'
+    ]
+    
+    # ===== 辅助函数 =====
+    def check_keywords(name, keywords):
+        """检查图层名称是否包含关键词列表中的任一关键词"""
+        name_lower = name.lower()
+        return any(keyword.lower() in name_lower for keyword in keywords)
+    
+    def is_text_layer(name):
+        """判断是否为文字图层"""
+        return check_keywords(name, text_keywords) or '文字' in name or '编号' in name
+    
+    def is_room_layer(name, info):
+        """判断是否为房间图层"""
+        # 基于名称判断
+        if check_keywords(name, room_keywords):
+            return True
+        
+        # 基于实体类型判断 - 房间常用闭合多段线或填充表示
         entity_types = info['entity_types']
         if ('LWPOLYLINE' in entity_types or 'POLYLINE' in entity_types or 'HATCH' in entity_types) and \
            not info['is_frozen']:
-            room_layers.append(layer_name)
+            # 额外判断：房间图层通常不包含大量线条
+            line_count = entity_types.get('LINE', 0)
+            polyline_count = entity_types.get('LWPOLYLINE', 0) + entity_types.get('POLYLINE', 0)
+            hatch_count = entity_types.get('HATCH', 0)
+            
+            # 如果多段线或填充数量较多，而线条相对较少，可能是房间图层
+            if (polyline_count > 5 or hatch_count > 0) and (line_count == 0 or polyline_count / line_count > 0.5):
+                return True
+        
+        return False
     
-    log_print(f"识别出 {len(room_layers)} 个可能的房间定义图层: {', '.join(room_layers) if room_layers else '无'}")
-    return room_layers
+    # ===== 第一步：预处理 - 识别文字、房间和其他基础图层 =====
+    for layer_name, info in layers_info.items():
+        # 检查是否为文字图层
+        if is_text_layer(layer_name):
+            text_layers.append(layer_name)
+            excluded_layers.append(layer_name)
+            continue
+            
+        # 检查是否为房间图层
+        if is_room_layer(layer_name, info):
+            room_layers.append(layer_name)
+            # 注意：房间图层不自动加入排除列表，因为有些图层可能既是房间图层又是墙体图层
+            continue
+    
+    # ===== 第二步：主处理 - 识别墙体和门窗图层 =====
+    for layer_name, info in layers_info.items():
+        # 跳过已识别的文字图层
+        if layer_name in text_layers:
+            continue
+        
+        # 判断墙体图层 (优先级最高)
+        if '隔墙' in layer_name or '砖墙' in layer_name or check_keywords(layer_name, wall_keywords):
+            wall_layers.append(layer_name)
+            continue
+        
+        # 判断门窗图层 (确保不是文字图层)
+        if check_keywords(layer_name, door_window_keywords) and not is_text_layer(layer_name):
+            door_window_layers.append(layer_name)
+            continue
+        
+        # 判断排除图层
+        if check_keywords(layer_name, exclude_keywords) and not check_keywords(layer_name, wall_keywords):
+            excluded_layers.append(layer_name)
+            continue
+            
+        # 特殊情况检查
+        if any(keyword in layer_name for keyword in ['灯', '洁具', '栏杆', '踏步', '暖通', 
+                                                 ('隔断' if '墙' not in layer_name else ''), '家具']):
+            excluded_layers.append(layer_name)
+            continue
+            
+        # 未分类图层，基于图层内容进行判断
+        entity_types = info['entity_types']
+        line_count = entity_types.get('LINE', 0) + entity_types.get('LWPOLYLINE', 0) + entity_types.get('POLYLINE', 0)
+        text_count = entity_types.get('TEXT', 0) + entity_types.get('MTEXT', 0)
+        
+        # 可能的墙体图层：线条多，文本少
+        if (line_count > 20 and (text_count == 0 or line_count / text_count > 10) 
+                and info['is_on'] and not info['is_frozen']):
+            wall_layers.append(layer_name)
+        else:
+            excluded_layers.append(layer_name)
+    
+    # ===== 第三步：检查隔墙类型的图层是否被误排除，恢复它们 =====
+    for layer_name in list(excluded_layers):
+        if '隔墙' in layer_name or '砖墙' in layer_name:
+            excluded_layers.remove(layer_name)
+            if layer_name not in wall_layers:
+                wall_layers.append(layer_name)
+                log_print(f"从排除列表中恢复墙体图层: {layer_name}")
+    
+    # ===== 第四步：最终清理 - 确保图层分类的一致性 =====
+    # 处理墙体图层
+    for layer_name in list(wall_layers):
+        # 如果是文字图层或已被排除的图层（除了特殊的隔墙和砖墙图层）
+        if is_text_layer(layer_name) or (layer_name in excluded_layers and 
+                                        '隔墙' not in layer_name and '砖墙' not in layer_name):
+            wall_layers.remove(layer_name)
+            if layer_name not in excluded_layers:
+                excluded_layers.append(layer_name)
+                log_print(f"从墙体图层中移除非墙体图层: {layer_name}")
+    
+    # 处理门窗图层
+    for layer_name in list(door_window_layers):
+        # 门窗图层不应出现在排除图层中
+        if layer_name in excluded_layers:
+            door_window_layers.remove(layer_name)
+            log_print(f"从门窗图层中移除被排除的图层: {layer_name}")
+        # 门窗图层不应是文字图层
+        elif is_text_layer(layer_name):
+            door_window_layers.remove(layer_name)
+            if layer_name not in excluded_layers:
+                excluded_layers.append(layer_name)
+                log_print(f"从门窗图层中移除文字/编号图层: {layer_name}")
+    
+    # ===== 第五步：处理房间图层与其他图层的关系 =====
+    # 记录既是房间图层又是墙体/门窗图层的情况
+    wall_room_overlap = [layer for layer in room_layers if layer in wall_layers]
+    door_room_overlap = [layer for layer in room_layers if layer in door_window_layers]
+    
+    if wall_room_overlap:
+        log_print(f"警告：以下图层既被识别为墙体图层又被识别为房间图层: {', '.join(wall_room_overlap)}")
+    
+    if door_room_overlap:
+        log_print(f"警告：以下图层既被识别为门窗图层又被识别为房间图层: {', '.join(door_room_overlap)}")
+    
+    # 合并墙体和门窗图层
+    all_layers = list(set(wall_layers + door_window_layers))
+    
+    # 输出日志
+    log_print(f"识别出的墙体图层: {', '.join(wall_layers)}")
+    log_print(f"识别出的门窗图层: {', '.join(door_window_layers)}")
+    log_print(f"识别出的房间图层: {', '.join(room_layers)}")
+    log_print(f"排除的非墙体图层: {', '.join(excluded_layers)}")
+    # log_print(f"保留的总图层数: {len(all_layers)}")
+    
+    return all_layers
 
 def clean_layers(doc, keep_layers):
     """
@@ -857,88 +1059,285 @@ def clean_layers(doc, keep_layers):
     
     参数:
         doc: ezdxf文档对象
-        keep_layers: 要保留的图层名称列表
+        keep_layers: 要保留的图层名称列表 (由identify_wall_layers函数返回)
     
     返回:
-        清理后的ezdxf文档对象
+        清理后的ezdxf文档对象，只包含keep_layers和0图层中的实体
     """
-    # 创建新文档以避免修改原始文档
+    # 导入transform模块
+    import ezdxf.transform as transform
+    
+    # 确保0图层被包含在要保留的图层列表中
+    if '0' not in keep_layers:
+        keep_layers.append('0')
+    
+    log_print(f"保留以下图层: {', '.join(keep_layers)}")
+    
+    # 创建新文档
     new_doc = ezdxf.new(dxfversion=doc.dxfversion)
     
-    # 记录已添加的图层
-    added_layers = set(['0'])  # 0图层默认存在
+    # 复制所有需要的图层定义
+    for layer_name in keep_layers:
+        if layer_name in doc.layers:
+            try:
+                source_layer = doc.layers.get(layer_name)
+                # 确保颜色值和线型是有效的
+                color = source_layer.dxf.color if hasattr(source_layer.dxf, 'color') and source_layer.dxf.color > 0 else 7
+                linetype = source_layer.dxf.linetype if hasattr(source_layer.dxf, 'linetype') else 'CONTINUOUS'
+                
+                # 添加图层到新文档
+                if layer_name != '0':  # 0图层默认存在
+                    new_doc.layers.add(
+                        name=layer_name,
+                        color=color,
+                        linetype=linetype
+                    )
+            except Exception as e:
+                log_print(f"警告: 添加图层 {layer_name} 时出错: {e}")
     
-    # 复制图层定义
-    for layer in doc.layers:
-        try:
-            layer_name = layer.dxf.name
-            if layer_name in keep_layers or layer_name == '0':  # 始终保留0图层
-                if layer_name not in added_layers:  # 避免重复添加
-                    try:
-                        # 确保颜色值是有效的
-                        color = layer.dxf.color if hasattr(layer.dxf, 'color') and layer.dxf.color > 0 else 7
-                        linetype = layer.dxf.linetype if hasattr(layer.dxf, 'linetype') else 'CONTINUOUS'
-                        
-                        new_doc.layers.add(
-                            name=layer_name,
-                            color=color,
-                            linetype=linetype
-                        )
-                        added_layers.add(layer_name)
-                    except ezdxf.lldxf.const.DXFTableEntryError:
-                        # 如果图层已存在（如0图层），则跳过
-                        pass
-        except Exception as e:
-            log_print(f"警告: 添加图层 {layer} 时出错: {e}")
-    
-    # 复制要保留的实体
+    # 使用transform模块复制保留图层中的实体
     new_msp = new_doc.modelspace()
-    for entity in doc.modelspace():
+    source_msp = doc.modelspace()
+    
+    # 初始化计数器
+    total_entities = 0
+    entities_kept = 0
+    
+    # 先收集要保留的实体
+    entities_to_copy = []
+    
+    # 遍历源文档中的所有实体
+    for entity in source_msp:
+        total_entities += 1
+        
         if hasattr(entity, 'dxf') and hasattr(entity.dxf, 'layer'):
-            layer_name = entity.dxf.layer
-            if layer_name in keep_layers or layer_name == '0':
-                # 只保留线条和多段线类型，这些通常用于表示墙体
-                if entity.dxftype() in ('LINE', 'LWPOLYLINE', 'POLYLINE'):
-                    # 不直接添加实体，而是根据实体类型创建新实体
-                    try:
-                        if entity.dxftype() == 'LINE':
-                            # 创建新的LINE
-                            new_entity = new_msp.add_line(
-                                start=entity.dxf.start,
-                                end=entity.dxf.end
-                            )
-                            new_entity.dxf.layer = layer_name
-                            
-                        elif entity.dxftype() == 'LWPOLYLINE':
-                            # 获取多段线点并创建新的LWPOLYLINE
-                            points = list(entity.get_points())
+            if entity.dxf.layer in keep_layers:
+                entities_to_copy.append(entity)
+    
+    # 使用transform.copies函数批量复制实体
+    if entities_to_copy:
+        try:
+            # 使用transform.copies模块复制实体
+            logger, copied_entities = transform.copies(entities_to_copy)
+            
+            # 将复制的实体添加到新的模型空间
+            for entity in copied_entities:
+                new_msp.add_entity(entity)
+                
+            entities_kept = len(entities_to_copy)
+        except Exception as e:
+            log_print(f"使用transform.copies复制实体时出错: {e}")
+            # 如果批量复制失败，回退到单独处理每个实体
+            log_print("回退到逐个实体处理模式...")
+            entities_kept = 0
+            
+            # 手动逐个复制实体
+            for entity in entities_to_copy:
+                try:
+                    entity_type = entity.dxftype()
+                    
+                    if entity_type == 'LINE':
+                        new_entity = new_msp.add_line(
+                            start=entity.dxf.start,
+                            end=entity.dxf.end
+                        )
+                        new_entity.dxf.layer = entity.dxf.layer
+                        entities_kept += 1
+                    
+                    elif entity_type == 'LWPOLYLINE':
+                        points = list(entity.get_points())
+                        if points:
                             new_entity = new_msp.add_lwpolyline(points)
-                            new_entity.dxf.layer = layer_name
-                            # 复制闭合状态
+                            new_entity.dxf.layer = entity.dxf.layer
                             if hasattr(entity, 'closed'):
                                 new_entity.closed = entity.closed
+                            entities_kept += 1
+                    
+                    elif entity_type == 'POLYLINE':
+                        try:
+                            vertices = []
+                            vertex_list = entity.vertices
+                            if callable(vertex_list):
+                                vertex_list = vertex_list()
                                 
-                        elif entity.dxftype() == 'POLYLINE':
-                            # POLYLINE处理更复杂，暂时简单处理
-                            log_print(f"注意: 简化处理POLYLINE，可能丢失某些属性")
-                            try:
+                            for vertex in vertex_list:
+                                if hasattr(vertex, 'dxf') and hasattr(vertex.dxf, 'location'):
+                                    vertices.append(vertex.dxf.location)
+                            
+                            if vertices:
+                                new_entity = new_msp.add_lwpolyline(vertices)
+                                new_entity.dxf.layer = entity.dxf.layer
+                                if hasattr(entity, 'is_closed') and entity.is_closed:
+                                    new_entity.closed = True
+                                entities_kept += 1
+                        except Exception as ve:
+                            log_print(f"警告: 处理POLYLINE顶点时出错: {ve}")
+                    
+                    elif entity_type == 'ARC':
+                        new_entity = new_msp.add_arc(
+                            center=entity.dxf.center,
+                            radius=entity.dxf.radius,
+                            start_angle=entity.dxf.start_angle,
+                            end_angle=entity.dxf.end_angle
+                        )
+                        new_entity.dxf.layer = entity.dxf.layer
+                        entities_kept += 1
+                    
+                    elif entity_type == 'CIRCLE':
+                        new_entity = new_msp.add_circle(
+                            center=entity.dxf.center,
+                            radius=entity.dxf.radius
+                        )
+                        new_entity.dxf.layer = entity.dxf.layer
+                        entities_kept += 1
+                    
+                    elif entity_type == 'ELLIPSE':
+                        new_entity = new_msp.add_ellipse(
+                            center=entity.dxf.center,
+                            major_axis=entity.dxf.major_axis,
+                            ratio=entity.dxf.ratio,
+                            start_param=entity.dxf.start_param if hasattr(entity.dxf, 'start_param') else 0,
+                            end_param=entity.dxf.end_param if hasattr(entity.dxf, 'end_param') else 6.28318
+                        )
+                        new_entity.dxf.layer = entity.dxf.layer
+                        entities_kept += 1
+                    
+                    elif entity_type == 'SPLINE':
+                        try:
+                            # 尝试从样条曲线中获取点
+                            points = None
+                            
+                            # 首先尝试获取拟合点
+                            if hasattr(entity, 'fit_points') and entity.fit_points and len(entity.fit_points) >= 2:
+                                points = entity.fit_points
+                                log_print(f"从SPLINE获取了 {len(points)} 个拟合点", level='debug')
+                            # 如果没有拟合点，尝试获取控制点
+                            elif hasattr(entity, 'control_points') and entity.control_points and len(entity.control_points) >= 2:
+                                points = entity.control_points
+                                log_print(f"从SPLINE获取了 {len(points)} 个控制点", level='debug')
+                            
+                            # 如果有足够的点，创建LWPOLYLINE
+                            if points is not None and len(points) >= 2:
+                                # 获取二维点
+                                points_2d = [(p.x, p.y) if hasattr(p, 'x') and hasattr(p, 'y') else (p[0], p[1]) for p in points]
+                                
+                                # 检查是否是闭合曲线
+                                is_closed = False
+                                if hasattr(entity, 'is_closed'):
+                                    is_closed = entity.is_closed
+                                
+                                # 创建LWPOLYLINE
+                                new_entity = new_msp.add_lwpolyline(
+                                    points=points_2d,
+                                    dxfattribs={
+                                        'layer': entity.dxf.layer
+                                    },
+                                    close=is_closed
+                                )
+                                
+                                log_print(f"已将SPLINE转换为LWPOLYLINE，共 {len(points_2d)} 个点, 闭合状态: {is_closed}", level='debug')
+                                entities_kept += 1
+                            else:
+                                log_print(f"跳过SPLINE：未找到足够的点", level='warning')
+                        except Exception as e:
+                            log_print(f"处理SPLINE实体时出错: {e}", level='warning')
+                    
+                    elif entity_type == 'INSERT':
+                        try:
+                            # 获取源块名称
+                            block_name = entity.dxf.name
+                            
+                            # 检查目标文档中是否已存在该块定义
+                            if block_name not in new_doc.blocks:
+                                # 获取源块定义
+                                source_block = doc.blocks.get(block_name)
+                                if source_block:
+                                    # 创建新块定义
+                                    target_block = new_doc.blocks.new(block_name)
+                                    
+                                    # 复制简单实体
+                                    for block_entity in source_block:
+                                        try:
+                                            # 只处理基本实体类型
+                                            if block_entity.dxftype() in ['LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE', 'ELLIPSE']:
+                                                # 使用transform.copy_entity复制实体
+                                                copied_entity = transform.copy_entity(block_entity, target_block)
+                                                log_print(f"已复制块'{block_name}'中的实体: {block_entity.dxftype()}", level='debug')
+                                        except Exception as be:
+                                            log_print(f"复制块'{block_name}'中的实体时出错: {be}", level='warning')
+                                else:
+                                    log_print(f"未找到块定义: {block_name}", level='warning')
+                            
+                            # 创建块引用
+                            new_entity = new_msp.add_blockref(
+                                name=block_name,
+                                insert=(entity.dxf.insert.x, entity.dxf.insert.y),
+                                dxfattribs={
+                                    'layer': entity.dxf.layer
+                                }
+                            )
+                            
+                            # 设置比例和旋转
+                            if hasattr(entity.dxf, 'xscale'):
+                                new_entity.dxf.xscale = entity.dxf.xscale
+                            if hasattr(entity.dxf, 'yscale'):
+                                new_entity.dxf.yscale = entity.dxf.yscale
+                            if hasattr(entity.dxf, 'zscale'):
+                                new_entity.dxf.zscale = entity.dxf.zscale
+                            if hasattr(entity.dxf, 'rotation'):
+                                new_entity.dxf.rotation = entity.dxf.rotation
+                                
+                            log_print(f"成功处理INSERT: {block_name}", level='debug')
+                            entities_kept += 1
+                        except Exception as e:
+                            log_print(f"处理INSERT实体时出错: {e}", level='warning')
+                    
+                    elif entity_type == 'HATCH':
+                        try:
+                            boundaries_processed = False
+                            # 获取填充边界
+                            for path in entity.paths:
+                                # path可能是坐标列表或带有vertices属性的对象
                                 vertices = []
-                                # 获取顶点
-                                for vertex in entity.vertices:
-                                    if hasattr(vertex, 'dxf') and hasattr(vertex.dxf, 'location'):
-                                        vertices.append(vertex.dxf.location)
+                                if hasattr(path, 'vertices'):
+                                    # 某些版本的ezdxf，path有vertices属性
+                                    vertices = path.vertices
+                                elif isinstance(path, (list, tuple)):
+                                    # 某些版本的ezdxf，path直接是坐标列表
+                                    vertices = path
                                 
-                                if vertices:
-                                    # 使用LWPOLYLINE替代POLYLINE
-                                    new_entity = new_msp.add_lwpolyline(vertices)
-                                    new_entity.dxf.layer = layer_name
-                                    # 复制闭合状态
-                                    if hasattr(entity, 'is_closed') and entity.is_closed:
-                                        new_entity.closed = True
-                            except Exception as ve:
-                                log_print(f"警告: 处理POLYLINE顶点时出错: {ve}")
-                    except Exception as e:
-                        log_print(f"警告: 创建实体时出错: {e}")
+                                # 处理顶点
+                                valid_vertices = []
+                                for vertex in vertices:
+                                    if isinstance(vertex, (list, tuple)) and len(vertex) >= 2:
+                                        valid_vertices.append((vertex[0], vertex[1]))
+                                    elif hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                                        valid_vertices.append((vertex.x, vertex.y))
+                                
+                                # 如果有足够的顶点，创建多段线边界
+                                if len(valid_vertices) >= 3:
+                                    polyline = new_msp.add_lwpolyline(valid_vertices)
+                                    polyline.dxf.layer = entity.dxf.layer
+                                    polyline.dxf.closed = True  # 填充边界通常是闭合的
+                                    boundaries_processed = True
+                            
+                            if boundaries_processed:
+                                log_print(f"HATCH转换为边界多段线成功", level='debug')
+                                entities_kept += 1
+                            else:
+                                log_print(f"未能处理HATCH边界: 没有有效的点", level='warning')
+                        except Exception as e:
+                            log_print(f"处理HATCH实体时出错: {e}", level='warning')
+                    
+                    else:
+                        log_print(f"跳过未处理的实体类型: {entity_type}")
+                
+                except Exception as e:
+                    log_print(f"手动复制实体时出错: {e}, 类型: {entity.dxftype() if hasattr(entity, 'dxftype') else '未知'}")
+    
+    # 打印统计信息
+    log_print(f"原始实体总数: {total_entities}")
+    log_print(f"已保留实体数: {entities_kept}")
     
     return new_doc
 
@@ -1017,11 +1416,11 @@ def repair_broken_lines(doc, tolerance=0.1):
 
 def extract_walls_and_rooms(doc, min_room_area, img_size=2000):
     """
-    从DXF文档中提取墙体和房间
+    从DXF文档中提取墙体线条和房间
     
     参数:
         doc: DXF文档对象
-        min_room_area: 最小房间面积百分比
+        min_room_area: 最小有效房间面积
         img_size: 图像大小
     
     返回:
@@ -1037,8 +1436,31 @@ def extract_walls_and_rooms(doc, min_room_area, img_size=2000):
     # 0. 分析图层信息
     layers_info = analyze_layers(doc)
     
-    # 识别房间定义图层和墙体图层
-    room_layers = identify_room_layers(layers_info)
+    # 识别墙体图层和房间图层
+    keep_layers = identify_wall_layers(layers_info)
+    
+    # 从墙体图层函数的返回中获取房间图层信息
+    # 临时提取房间图层列表，不影响原有代码逻辑
+    room_layers = []
+    for layer_name, info in layers_info.items():
+        # 使用与identify_wall_layers中相同的is_room_layer判断逻辑
+        # 判断是否为房间图层
+        if any(keyword in layer_name.lower() for keyword in ['room', 'room', '房间', '房', 'space', 'space', '空间', 
+                                                           'area', 'area', '区域', 'arch-room', 'a-room', 'a-zone']):
+            room_layers.append(layer_name)
+            continue
+            
+        # 基于实体类型判断
+        entity_types = info['entity_types']
+        if ('LWPOLYLINE' in entity_types or 'POLYLINE' in entity_types or 'HATCH' in entity_types) and \
+           not info['is_frozen']:
+            # 额外判断
+            line_count = entity_types.get('LINE', 0)
+            polyline_count = entity_types.get('LWPOLYLINE', 0) + entity_types.get('POLYLINE', 0)
+            hatch_count = entity_types.get('HATCH', 0)
+            
+            if (polyline_count > 5 or hatch_count > 0) and (line_count == 0 or polyline_count / line_count > 0.5):
+                room_layers.append(layer_name)
     
     # 1. 先尝试从专门的房间图层提取房间
     rooms_from_layers = []
@@ -1838,7 +2260,7 @@ def save_image(img, output_file, title=None):
         # 验证文件是否创建成功
         if os.path.exists(output_file):
             log_print(f"图像已成功保存到: {output_file}")
-            log_print(f"文件大小: {os.path.getsize(output_file)} 字节")
+            # log_print(f"文件大小: {os.path.getsize(output_file)} 字节")
             return True
         else:
             log_print(f"保存图像失败: {output_file}", 'error')

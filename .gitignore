@@ -1,0 +1,107 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE and Editor folders
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+## CAD文件
+*.dxf
+*.dwg
+*.zip
+
+## 数据文件夹
+data/
+*/data/
+
+## 输出文件夹
+output/
+output_*/
+*/output/
+results/
+results_*/
+
+## 日志文件夹
+log/
+logs/
+*/logs/
+*/log/
+
+## 调试文件夹
+debug/
+*/debug/
+debug_*/
+
+## 临时文件
+temp/
+tmp/
+*.tmp
+*.temp
+
+## 结果和报告文件
+*.txt
+*.wkt
+*.csv
+*.xlsx
+*.json
+*.xml
+*.html
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+
+# 不忽略重要的项目文件
+!requirements.txt
+!README.md
+!LICENSE
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
